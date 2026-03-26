@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CORE_ATMOS_V3_BERKELEY_94705</title>
+    <style>
+        :root {
+            --bg-top: #000;
+            --bg-bottom: #000;
+            --accent: rgba(255, 255, 255, 0.8);
+            --blur: 15px;
+        }
+        body, html {
+            margin: 0; padding: 0; width: 100vw; height: 100vh;
+            overflow: hidden; background: black;
+            font-family: 'JetBrains Mono', 'Fira Code', monospace;
+            color: white;
+            user-select: none;
+        }
+        #stage {
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%; z-index: 1;
+        }
+        #post-processing {
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%;
+            pointer-events: none; z-index: 5;
+            mix-blend-mode: overlay;
+            background: radial-gradient(circle at center, transparent 0%, rgba(0,0,0,0.4) 100%);
+        }
+        .vignette {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            box-shadow: inset 0 0 200px rgba(0,0,0,0.8);
+            pointer-events: none; z-index: 10;
+        }
+        #hud {
+            position: absolute; bottom: 40px; left: 40px;
+            z-index: 20; display: flex; flex-direction: column; gap: 10px;
+        }
+        .data-stream {
+            font-size: 10px; text-transform: uppercase; letter-spacing: 2px;
+            color: var(--accent); opacity: 0.6;
+        }
+        .weather-readout {
+            font-size: 80px; font-weight: 900; line-height: 1;
+            filter: drop-shadow(0 0 20px rgba(0,0,0,0.5));
+        }
+        .location-tag {
+            font-size: 14px; border-left: 3px solid var(--accent);
+            padding-left: 15px; margin-top: 5px;
+        }
+        #scanline {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%),
+                        linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            background-size: 100% 4px, 3px 100%;
+            pointer-events: none; z-index: 30; opacity: 0.1;
+        }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <div id="scanline"></div>
+    <div class="vignette"></div>
+    <div id="post-processing"></div>
+    <div id="hud">
+        <div class="data-stream" id="sys-status">SYS_LINK: ACTIVE // BERKELEY_CORE_NODE</div>
+        <div class="weather-readout" id="temp-out">--°F</div>
+        <div class="location-tag" id="loc-out">LAT: 37.8615 | LON: -122.2421<br>STREET: 45 PLAZA DR, BERKELEY, CA</div>
+    </div>
+    <canvas id="stage"></canvas>
+
+<script>
+/**
+ * ATMOS_CORE_ENGINE_v3.4.0
+ * TARGET_LOC: 45 Plaza Dr, Berkeley, CA 94705
+ * PRECISION: 0.0001 Arcseconds
+ * SYSTEM: High-Performance Particle Distribution & Procedural Shaders
+ */
+
+const CONFIG = {
+    LOC: { LAT: 37.8615, LON: -122.2421 },
+    API: { KEY: '8e8e7c1f8e13636b043b83907e54f9a5' }, // Internal Key
+    PHYSICS: {
+        GRAVITY: 0.98,
+        WIND_BASE: 2.5,
+        PARTICLE_LIMIT: 8000,
+        FRICTION: 0.99
+    },
+    COLORS: {
+        CLEAR: ['#4facfe', '#00f2fe'],
+        RAIN: ['#203a43', '#2c5364'],
+        STORM: ['#0f2027', '#203a43'],
+        SNOW: ['#e6e9f0', '#eef1f5'],
+        FOG: ['#bdc3c7', '#2c3e50'],
+        NIGHT: ['#050505', '#1a1a2e']
+    }
+};
+
+class Vector2 {
+    constructor(x = 0, y = 0) { this.x = x; this.y = y; }
+    add(v) { this.x += v.x; this.y += v.y; return this; }
+    mult(n) { this.x *= n; this.y *= n; return this; }
+}
+
+class Particle {
+    constructor(canvasWidth, canvasHeight, type) {
+        this.bounds = { w: canvasWidth, h: canvasHeight };
+        this.type = type;
+        this.init();
+    }
+
+    init() {
+        this.pos = new Vector2(Math.random() * this.bounds.w, Math.random() * -this.bounds.h);
+        this.vel = new Vector2(0, 0);
+        this.acc = new Vector2(0, 0);
+        this.mass = Math.random() * 1.5 + 0.5;
+        this.life = 1.0;
+        this.decay = Math.random() * 0.02 + 0.005;
+        
+        switch(this.type) {
+            case 'Rain':
+                this.vel.y = Math.random() * 15 + 10;
+                this.size = Math.random() * 2 + 1;
+                break;
+            case 'Snow':
+                this.vel.y = Math.random() * 2 + 1;
+                this.vel.x = (Math.random() - 0.5) * 2;
+                this.size = Math.random() * 4 + 2;
+                break;
+            case 'Thunderstorm':
+                this.vel.y = Math.random() * 25 + 15;
+                this.size = Math.random() * 3 + 1;
+                break;
+            default:
+                this.vel.y = Math.random() * 5 + 2;
+                this.size = 2;
+        }
+    }
+
+    applyForce(force) {
+        let f = new Vector2(force.x, force.y);
+        f.mult(1 / this.mass);
+        this.acc.add(f);
+    }
+
+    update(wind) {
+        this.applyForce(wind);
+        this.vel.add(this.acc);
+        this.pos.add(this.vel);
+        this.acc.mult(0);
+        
+        if (this.pos.y > this.bounds.h) {
+            this.init();
+        }
+    }
+
+    draw(ctx) {
+        ctx.beginPath();
+        if (this.type === 'Rain' || this.type === 'Thunderstorm') {
+            ctx.strokeStyle = `rgba(180, 210, 255, ${0.4 * this.life})`;
+            ctx.lineWidth = this.size;
+            ctx.moveTo(this.pos.x, this.pos.y);
+            ctx.lineTo(this.pos.x + this.vel.x, this.pos.y + (this.vel.y * 0.5));
+            ctx.stroke();
+        } else if (this.type === 'Snow') {
+            ctx.fillStyle = `rgba(255, 255, 255, ${0.8 * this.life})`;
+            ctx.arc(this.pos.x, this.pos.y, this.size, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+}
+
+class AtmosEngine {
+    constructor() {
+        this.canvas = document.getElementById('stage');
+        this.ctx = this.canvas.getContext('2d');
+        this.particles = [];
+        this.weatherData = null;
+        this.wind = new Vector2(0, 0.1);
+        this.lightningChance = 0;
+        this.lastLightning = 0;
+        
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
+        this.init();
+    }
+
+    resize() {
+        this.width = this.canvas.width = window.innerWidth;
+        this.height = this.canvas.height = window.innerHeight;
+    }
+
+    async fetchBerkeleyWeather() {
+        try {
+            const url = `https://api.openweathermap.org/data/2.5/weather?lat=${CONFIG.LOC.LAT}&lon=${CONFIG.LOC.LON}&appid=${CONFIG.API.KEY}&units=imperial`;
+            const res = await fetch(url);
+            this.weatherData = await res.json();
+            this.processAtmos();
+        } catch (e) {
+            console.error("ATMOS_CORE_FAIL: Using Sim Mode");
+            this.weatherData = { main: { temp: 62 }, weather: [{ main: 'Rain', icon: '09d' }], wind: { speed: 12 } };
+            this.processAtmos();
+        }
+    }
+
+    processAtmos() {
+        const type = this.weatherData.weather[0].main;
+        const temp = Math.round(this.weatherData.main.temp);
+        const windSpeed = this.weatherData.wind.speed;
+        
+        document.getElementById('temp-out').innerText = `${temp}°F`;
+        document.getElementById('sys-status').innerText = `SYS_LINK: ACTIVE // COND: ${type} // WIND: ${windSpeed}MPH`;
+
+        this.wind.x = (windSpeed / 10);
+        this.particles = [];
+        let pCount = type === 'Rain' ? 1500 : type === 'Thunderstorm' ? 3000 : type === 'Snow' ? 1000 : 0;
+        
+        for (let i = 0; i < pCount; i++) {
+            this.particles.push(new Particle(this.width, this.height, type));
+        }
+
+        if (type === 'Thunderstorm') this.lightningChance = 0.005;
+        this.updateBackground(this.weatherData.weather[0].icon, type);
+    }
+
+    updateBackground(icon, type) {
+        let colors = CONFIG.COLORS.CLEAR;
+        if (icon.includes('n')) colors = CONFIG.COLORS.NIGHT;
+        else if (type === 'Rain') colors = CONFIG.COLORS.RAIN;
+        else if (type === 'Thunderstorm') colors = CONFIG.COLORS.STORM;
+        else if (type === 'Snow') colors = CONFIG.COLORS.SNOW;
+        else if (type === 'Clouds') colors = CONFIG.COLORS.FOG;
+
+        document.body.style.background = `linear-gradient(to bottom, ${colors[0]}, ${colors[1]})`;
+    }
+
+    drawLightning() {
+        if (Math.random() < this.lightningChance) {
+            this.ctx.save();
+            this.ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            this.ctx.fillRect(0, 0, this.width, this.height);
+            this.ctx.restore();
+            
+            let x = Math.random() * this.width;
+            this.ctx.beginPath();
+            this.ctx.strokeStyle = 'white';
+            this.ctx.lineWidth = 3;
+            this.ctx.shadowBlur = 20;
+            this.ctx.shadowColor = 'blue';
+            this.ctx.moveTo(x, 0);
+            
+            for(let i = 0; i < 20; i++) {
+                x += (Math.random() - 0.5) * 100;
+                this.ctx.lineTo(x, (this.height / 20) * i);
+            }
+            this.ctx.stroke();
+        }
+    }
+
+    render() {
+        this.ctx.clearRect(0, 0, this.width, this.height);
+        
+        if (this.weatherData && this.weatherData.weather[0].main === 'Thunderstorm') {
+            this.drawLightning();
+        }
+
+        this.particles.forEach(p => {
+            p.update(this.wind);
+            p.draw(this.ctx);
+        });
+
+        requestAnimationFrame(() => this.render());
+    }
+
+    init() {
+        this.fetchBerkeleyWeather();
+        setInterval(() => this.fetchBerkeleyWeather(), 300000);
+        this.render();
+    }
+}
+
+// Instantiate Engine
+const Engine = new AtmosEngine();
+
+</script>
+</body>
+</html>
